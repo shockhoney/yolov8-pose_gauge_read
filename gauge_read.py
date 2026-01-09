@@ -8,35 +8,50 @@ import sys
 from ultralytics import YOLO
 
 # ==========================================
-# 0. 环境修复与配置
+# 0. 环境初始化与配置
 # ==========================================
-# 设置日志级别，屏蔽 PaddleOCR 的调试信息 (替代旧版 show_log=False)
+# 屏蔽 PaddleOCR 的调试日志
 logging.getLogger("ppocr").setLevel(logging.WARNING)
 
+# 检查 paddleocr 是否安装
 try:
     from paddleocr import PaddleOCR
 except ImportError:
-    print("请安装 paddleocr: pip install paddleocr")
+    print("[Error] 缺少 paddleocr 库。")
+    print("请运行: pip install paddlepaddle paddleocr --upgrade")
     sys.exit(1)
 
-# YOLO 类别 ID (根据你的模型设定)
+# YOLO 类别 ID (必须与你训练的模型一致)
 CLS_CENTER = 0
 CLS_GAUGE  = 1
 CLS_MAX    = 2
 CLS_MIN    = 3
 CLS_TIP    = 4
 
-# 初始化 OCR
-# 修复点：移除了 show_log 参数；保留 use_angle_cls (虽然有警告但兼容性最好)
-# 如果想消除警告，可改用 use_textline_orientation=True，但需确认 paddle 版本
+# 初始化 OCR 引擎 (兼容性处理)
 try:
-    ocr = PaddleOCR(use_angle_cls=True, lang='en')
+    print("[Init] 初始化 PaddleOCR...")
+    # 尝试使用新版 API (v2.7+)
+    ocr = PaddleOCR(use_textline_orientation=True, lang='en', show_log=False)
+except TypeError:
+    try:
+        # 回退到旧版 API (v2.6及以下)
+        ocr = PaddleOCR(use_angle_cls=True, lang='en', show_log=False)
+    except ValueError:
+        # 处理 show_log 参数被移除的情况 (最新版 v2.9+)
+        try:
+            ocr = PaddleOCR(use_textline_orientation=True, lang='en')
+        except TypeError:
+            # 最底层的兼容
+            ocr = PaddleOCR(use_angle_cls=True, lang='en')
 except Exception as e:
-    print(f"OCR 初始化失败，请尝试升级 paddlepaddle: {e}")
+    print(f"\n[Fatal Error] PaddleOCR 初始化失败: {e}")
+    print("原因: 你的 paddlepaddle 版本过低，缺少 device 模块。")
+    print("解决: 请执行 -> pip install paddlepaddle paddleocr --upgrade")
     sys.exit(1)
 
 # ==========================================
-# 工具函数：数学与几何
+# 工具函数
 # ==========================================
 def get_angle(center, point):
     """计算点相对于圆心的角度 (0-360度, X轴正向为0, 顺时针增加)"""
@@ -46,211 +61,186 @@ def get_angle(center, point):
     return (angle + 360) % 360
 
 def dist_sq(p1, p2):
-    """计算两点距离的平方"""
+    """计算距离平方"""
     return (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2
 
 def parse_number(text):
-    """正则提取数字 (支持小数、负数)"""
-    # 替换常见OCR错误: 逗号转点, 字母l/O转数字
-    text = text.replace(',', '.').replace('l', '1').replace('O', '0')
+    """从文本提取数字，处理常见 OCR 误读"""
+    # 替换: 逗号->点, l->1, O->0
+    text = text.replace(',', '.').replace('l', '1').replace('O', '0').lower()
+    # 匹配: 可带负号、小数点的数字
     match = re.search(r"-?\d+(\.\d+)?", text)
-    return float(match.group()) if match else None
+    if match:
+        try:
+            return float(match.group())
+        except ValueError:
+            return None
+    return None
 
 # ==========================================
-# 核心功能 A: 图像处理与 OCR
+# 核心逻辑 A: OCR 量程识别
 # ==========================================
 def preprocess_roi(roi):
-    """步骤 3: OCR 前图像增强"""
+    """图像增强：让数字在金属反光表面更清晰"""
     if roi.size == 0: return roi
-    # 1. 灰度化
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    # 2. 高斯去噪
     blur = cv2.GaussianBlur(gray, (3, 3), 0)
-    # 3. CLAHE 局部对比度增强 (应对反光)
+    # CLAHE 局部对比度增强
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    enhanced = clahe.apply(blur)
-    return enhanced
+    return clahe.apply(blur)
 
 def get_range_values(img, gauge_box, pt_min, pt_max):
     """
-    步骤 1-6: 在表盘 ROI 中识别数字，并根据距离匹配 vmin 和 vmax
+    裁剪表盘 ROI -> 识别所有数字 -> 根据距离匹配 Min/Max 值
     """
     gx1, gy1, gx2, gy2 = map(int, gauge_box)
-    
-    # [步骤 1] 裁剪 ROI
     h, w = img.shape[:2]
-    pad = 10
+    
+    # 扩大一点 ROI，防止数字贴边被切
+    pad = 15
     rx1, ry1 = max(0, gx1-pad), max(0, gy1-pad)
     rx2, ry2 = min(w, gx2+pad), min(h, gy2+pad)
     roi = img[ry1:ry2, rx1:rx2]
     
     if roi.size == 0: return None, None
 
-    # [步骤 3] 预处理
+    # 预处理
     roi_input = preprocess_roi(roi)
     
-    # [步骤 4] PaddleOCR 识别
-    # cls=True 用于纠正文本方向
+    # 识别
     result = ocr.ocr(roi_input, cls=True)
     
     candidates = []
     if result and result[0]:
         for line in result[0]:
-            # line 结构: [ [[x1,y1],...], ("text", score) ]
+            # line: [ [points], (text, score) ]
             box_points = np.array(line[0])
             text = line[1][0]
             
-            # [步骤 5] 提取数字
             val = parse_number(text)
             if val is not None:
-                # 计算文字框中心 (转换回原图全局坐标)
+                # 将 ROI 坐标转回全图坐标
                 cx = np.mean(box_points[:, 0]) + rx1
                 cy = np.mean(box_points[:, 1]) + ry1
                 candidates.append({'val': val, 'center': (cx, cy)})
     
     if len(candidates) < 2:
-        return None, None # 没识别到足够的数字
+        return None, None 
         
-    # [步骤 6] 空间距离匹配
-    # 找离 Min 检测点最近的数字
+    # 空间匹配：谁离 Min 点近，谁就是 vmin
     vmin = min(candidates, key=lambda x: dist_sq(pt_min, x['center']))['val']
-    # 找离 Max 检测点最近的数字
     vmax = min(candidates, key=lambda x: dist_sq(pt_max, x['center']))['val']
     
-    # 简单校验：通常 vmax > vmin，如果反了则交换
+    # 简单的逻辑修正
     if vmax < vmin:
         vmin, vmax = vmax, vmin
         
     return vmin, vmax
 
 # ==========================================
-# 核心功能 B: 几何计算读数
+# 核心逻辑 B: 角度计算与读数
 # ==========================================
 def calculate_reading(pt_center, pt_min, pt_max, pt_tip, vmin, vmax):
-    """
-    步骤 1-4: 计算角度比例并映射数值
-    """
-    # [步骤 2] 计算三个角度
+    # 1. 计算角度
     ang_min = get_angle(pt_center, pt_min)
     ang_max = get_angle(pt_center, pt_max)
     ang_tip = get_angle(pt_center, pt_tip)
     
-    # [步骤 3] 计算比例 p
-    # 顺时针总跨度
+    # 2. 计算顺时针跨度
     cw_total = (ang_max - ang_min + 360) % 360
-    # 顺时针当前指针跨度
     cw_curr  = (ang_tip - ang_min + 360) % 360
     
-    # 简单判断：如果总跨度合理 (一般仪表盘 < 300度)
-    if 10 < cw_total <= 300:
+    # 3. 计算进度 p
+    # 正常表盘刻度范围一般在 90~320 度之间
+    if 10 < cw_total <= 340:
         p = cw_curr / cw_total
     else:
-        # 如果 cw_total 极小(接近0)或极大(接近360)，说明 min/max 很接近
-        # 可能是圆形表盘刻度正好绕了一圈，或者识别错误
-        # 这里做一个简单的兜底：假设满偏
-        if cw_total == 0:
-            p = 0
-        else:
-            p = cw_curr / cw_total
+        p = 0.0
 
-    # 钳位：防止指针略微超出 Min/Max 导致读数剧变
-    if p > 1.2: p = 0.0 # 视为在 Min 左侧
-    elif p > 1.0: p = 1.0 # 视为爆表
+    # 4. 钳位 (Clamping)
+    if p > 1.2: p = 0.0
+    elif p > 1.0: p = 1.0
     
-    # [步骤 4] 线性映射
-    value = vmin + p * (vmax - vmin)
-    return value
+    # 5. 线性插值
+    return vmin + p * (vmax - vmin)
 
 # ==========================================
-# 主流程
+# 主程序
 # ==========================================
-def process_gauge(weights_path, source_path, output_path):
-    print(f"正在加载模型: {weights_path}")
-    model = YOLO(weights_path)
-    
-    print(f"正在读取图片: {source_path}")
-    img = cv2.imread(source_path)
-    if img is None: 
-        print("图片读取失败")
+def process_gauge(weights, source, output):
+    print(f"[Init] 加载 YOLO 模型: {weights}")
+    try:
+        model = YOLO(weights)
+    except Exception as e:
+        print(f"[Error] 模型加载失败: {e}")
         return
 
-    # 1. YOLO 检测
+    print(f"[Proc] 读取图片: {source}")
+    img = cv2.imread(source)
+    if img is None:
+        print("[Error] 图片文件不存在")
+        return
+
+    # YOLO 推理
     results = model(img, verbose=False)[0]
-    boxes = results.boxes.data.cpu().numpy() # [x1,y1,x2,y2,conf,cls]
+    boxes = results.boxes.data.cpu().numpy() 
     
-    # 筛选出所有表盘 (Class 1)
     gauges = boxes[boxes[:, 5] == CLS_GAUGE]
-    print(f"检测到 {len(gauges)} 个表盘")
+    print(f"[Info] 检测到 {len(gauges)} 个仪表盘")
     
     for i, g_box in enumerate(gauges):
         gx1, gy1, gx2, gy2 = g_box[:4]
         
-        # 辅助函数：在当前 Gauge 框内找关键点
-        def get_best_point(cls_id):
+        # 寻找关键点
+        def get_pt(cls_id):
             c_boxes = boxes[boxes[:, 5] == cls_id]
-            in_gauge = []
+            valid = []
             for b in c_boxes:
                 cx, cy = (b[0]+b[2])/2, (b[1]+b[3])/2
-                # 稍微放宽一点边界判断
-                if (gx1-10) < cx < (gx2+10) and (gy1-10) < cy < (gy2+10):
-                    in_gauge.append(b)
-            if not in_gauge: return None
-            best = max(in_gauge, key=lambda x: x[4])
+                if (gx1-20) < cx < (gx2+20) and (gy1-20) < cy < (gy2+20):
+                    valid.append(b)
+            if not valid: return None
+            best = max(valid, key=lambda x: x[4])
             return ((best[0]+best[2])/2, (best[1]+best[3])/2)
 
-        # [步骤 B-1] 获取四个关键点
-        pt_c   = get_best_point(CLS_CENTER)
-        pt_min = get_best_point(CLS_MIN)
-        pt_max = get_best_point(CLS_MAX)
-        pt_tip = get_best_point(CLS_TIP)
+        pt_c   = get_pt(CLS_CENTER)
+        pt_min = get_pt(CLS_MIN)
+        pt_max = get_pt(CLS_MAX)
+        pt_tip = get_pt(CLS_TIP)
         
-        # 绘图基础框
+        # 绘图
         cv2.rectangle(img, (int(gx1), int(gy1)), (int(gx2), int(gy2)), (0, 255, 0), 2)
         
         if not (pt_c and pt_min and pt_max and pt_tip):
-            print(f"Gauge {i}: 关键点缺失，跳过")
-            missing = []
-            if not pt_c: missing.append("Center")
-            if not pt_min: missing.append("Min")
-            if not pt_max: missing.append("Max")
-            if not pt_tip: missing.append("Tip")
-            cv2.putText(img, f"Missing: {','.join(missing)}", (int(gx1), int(gy1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,0,255), 2)
+            print(f"  -> Gauge {i+1}: 关键点缺失，跳过")
             continue
             
-        # [阶段 A] OCR 自动量程
+        # --- 阶段 A: OCR ---
         vmin, vmax = get_range_values(img, g_box[:4], pt_min, pt_max)
         
-        origin_source = "OCR"
         if vmin is None:
-            print(f"Gauge {i}: OCR 失败，使用默认量程 (0-1.6)")
+            print(f"  -> Gauge {i+1}: OCR 失败，使用默认 (0-1.6)")
             vmin, vmax = 0.0, 1.6
-            origin_source = "Default"
             
-        # [阶段 B] 计算读数
+        # --- 阶段 B: 读数 ---
         value = calculate_reading(pt_c, pt_min, pt_max, pt_tip, vmin, vmax)
         
-        # [步骤 B-5] 绘图保存
-        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_tip[0]), int(pt_tip[1])), (0, 0, 255), 3)
-        cv2.circle(img, (int(pt_min[0]), int(pt_min[1])), 4, (255,0,0), -1) # Min点 蓝
-        cv2.circle(img, (int(pt_max[0]), int(pt_max[1])), 4, (0,0,255), -1) # Max点 红
+        print(f"  -> Gauge {i+1}: 读数={value:.3f} (量程 {vmin}~{vmax})")
         
-        info = f"{value:.2f}"
-        range_info = f"({vmin}~{vmax})"
-        
-        print(f"Gauge {i}: 读数={value:.3f}, 量程={range_info}")
-        
-        cv2.putText(img, info, (int(gx1), int(gy1)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-        cv2.putText(img, range_info, (int(gx1), int(gy2)+20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+        # 可视化
+        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_tip[0]), int(pt_tip[1])), (0, 0, 255), 2)
+        cv2.putText(img, f"{value:.2f}", (int(gx1), int(gy1)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        cv2.putText(img, f"R: {vmin}-{vmax}", (int(gx1), int(gy2)+20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200,200,200), 1)
 
-    cv2.imwrite(output_path, img)
-    print(f"处理完成，结果已保存至: {output_path}")
+    cv2.imwrite(output, img)
+    print(f"[Done] 保存至: {output}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--weights", type=str, default="/home/devops/works/analog-gauge-reader/runs/detect/train4/weights/best.pt", required=True, help="YOLO模型路径 (best.pt)")
-    parser.add_argument("--source", type=str, default="test.jpg", required=True, help="输入图片路径")
-    parser.add_argument("--output", type=str, default="result_view.jpg", help="输出图片路径")
-    
+    parser.add_argument("--weights", default="/home/devops/works/analog-gauge-reader/runs/detect/train4/weights/best.pt",type=str, required=True)
+    parser.add_argument("--source",type=str, default="test.jpg", type=str, required=True)
+    parser.add_argument("--output", type=str, default="result_view.jpg")
     args = parser.parse_args()
     
     process_gauge(args.weights, args.source, args.output)
+
