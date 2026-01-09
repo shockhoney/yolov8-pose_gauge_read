@@ -238,3 +238,6 @@ images/
 
 # Temporary files created by the app
 tmp_openocr_input.jpg
+
+#data
+data/

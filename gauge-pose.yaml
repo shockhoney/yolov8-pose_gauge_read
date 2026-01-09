@@ -1,4 +1,4 @@
-path: ./crops
+path: ./data
 
 train: train/images
 val:   valid/images
