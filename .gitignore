@@ -209,8 +209,7 @@ __marimo__/
 # --- Project-specific: analog-gauge-reader ---
 
 # Ultralytics training outputs
-runs/
-outputs/
+
 logs/
 wandb/
 tensorboard/

@@ -1,0 +1,13 @@
+train: data/train/images
+val: data/valid/images
+test: data/test/images
+
+nc: 5
+names: ['center', 'gauge', 'max', 'min', 'tip']
+
+roboflow:
+  workspace: dataset-qxuat
+  project: analog-gauge-wj1r6
+  version: 2
+  license: CC BY 4.0
+  url: https://universe.roboflow.com/dataset-qxuat/analog-gauge-wj1r6/dataset/2
