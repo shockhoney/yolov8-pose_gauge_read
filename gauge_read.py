@@ -7,7 +7,7 @@ import sys
 from ultralytics import YOLO
 
 # -----------------------------------------------------------
-# 环境初始化
+# 环境检查
 # -----------------------------------------------------------
 try:
     import easyocr
@@ -21,72 +21,76 @@ reader = easyocr.Reader(['en'], gpu=True)
 CLS_CENTER, CLS_GAUGE, CLS_MAX, CLS_MIN, CLS_TIP = 0, 1, 2, 3, 4
 
 # -----------------------------------------------------------
-# 核心逻辑：智能角度计算
+# 核心逻辑：基于中轴线的强制校准算法
 # -----------------------------------------------------------
-def get_angle(center, point):
-    """计算绝对角度 (0-360)，X轴正向为0，顺时针增加"""
+def calculate_angle(center, point):
+    """计算绝对角度 (0-360)，X轴正向为0，顺时针增加 (图像坐标系 Y向下)"""
     dx = point[0] - center[0]
     dy = point[1] - center[1]
     angle = math.degrees(math.atan2(dy, dx))
     return (angle + 360) % 360
 
-def calculate_value_smart(pt_c, pt_min, pt_max, pt_tip, vmin, vmax):
+def get_reading_calibrated(pt_c, pt_min, pt_max, pt_tip, vmin, vmax):
     """
-    【智能读数算法】
-    1. 计算 Min/Max 原始角度
-    2. 判断是否符合标准 270度 表盘特征
-    3. 如果符合，使用虚拟刻度修正 Min/Max 角度，消除文字框偏移带来的误差
+    【强制校准版】
+    不直接使用 Min/Max 的角度差作为量程，而是：
+    1. 计算 Min 和 Max 的角平分线（表盘中轴线）。
+    2. 强制假设量程为 270度 (工业标准)。
+    3. 推算出虚拟的、精确的 0刻度 和 满刻度 位置。
     """
-    ang_min_raw = get_angle(pt_c, pt_min)
-    ang_max_raw = get_angle(pt_c, pt_max)
-    ang_tip     = get_angle(pt_c, pt_tip)
+    # 1. 获取原始角度
+    ang_min = calculate_angle(pt_c, pt_min)
+    ang_max = calculate_angle(pt_c, pt_max)
+    ang_tip = calculate_angle(pt_c, pt_tip)
 
-    # 1. 计算原始跨度 (顺时针 Min -> Max)
-    span_raw = (ang_max_raw - ang_min_raw + 360) % 360
-
-    # 2. 计算中轴线角度 (指向表盘底部空白处)
-    #    它是 Min 和 Max 的角平分线
-    bisector_angle = (ang_min_raw + span_raw / 2) % 360
-
-    # 3. 智能修正逻辑
-    #    绝大多数工业表盘是 270度 (3/4圆)
-    #    如果原始检测的跨度在 240~300 之间，我们强制将其校准为 270度
-    #    这样可以修复 "数字框中心" 与 "刻度线" 不重合导致的误差
-    STANDARD_SPAN = 270.0
+    # 2. 计算表盘中轴线 (Symmetry Axis)
+    #    方法：利用向量相加找到 Min 和 Max 的中间方向
+    vec_min = np.array([pt_min[0]-pt_c[0], pt_min[1]-pt_c[1]])
+    vec_max = np.array([pt_max[0]-pt_c[0], pt_max[1]-pt_c[1]])
+    # 归一化向量，防止距离影响角度计算
+    vec_min = vec_min / np.linalg.norm(vec_min)
+    vec_max = vec_max / np.linalg.norm(vec_max)
     
-    if 240 < span_raw < 300:
-        # 使用虚拟刻度
-        # print(f"  [Debug] 启用 270度 标准表盘修正 (原始跨度: {span_raw:.1f}°)")
-        virtual_start = (bisector_angle - STANDARD_SPAN / 2 + 360) % 360
-        # virtual_end   = (bisector_angle + STANDARD_SPAN / 2 + 360) % 360
-        
-        # 修正后的总量程
-        span_total = STANDARD_SPAN
-        # 修正后的指针跨度 (相对于虚拟起点)
-        span_tip = (ang_tip - virtual_start + 360) % 360
-    else:
-        # 非标表盘，使用原始检测值
-        span_total = span_raw
-        span_tip = (ang_tip - ang_min_raw + 360) % 360
+    vec_mid = vec_min + vec_max
+    # 计算中轴线角度 (指向表盘底部空缺处)
+    ang_mid = calculate_angle((0,0), (vec_mid[0], vec_mid[1]))
 
-    # 4. 读数映射与死区处理
-    #    正常范围
-    if span_tip <= span_total:
-        progress = span_tip / span_total
-        return vmin + progress * (vmax - vmin)
+    # 3. 强制使用 270度 量程模型
+    #    大多数压力表有效刻度是 270度。
+    #    Min (0值) 应该在中轴线 逆时针 135度 的位置
+    #    Max (满值) 应该在中轴线 顺时针 135度 的位置
+    FIXED_SPAN = 270.0
+    HALF_SPAN = FIXED_SPAN / 2.0
     
-    #    死区处理 (指针在 Max 和 Min 之间的空白区)
+    # 虚拟的精确起止角度
+    virtual_start_ang = (ang_mid - HALF_SPAN + 360) % 360
+    # virtual_end_ang   = (ang_mid + HALF_SPAN + 360) % 360
+    
+    # 4. 计算指针相对于虚拟起点的角度
+    #    (Tip - Start + 360) % 360
+    span_tip = (ang_tip - virtual_start_ang + 360) % 360
+    
+    # 5. 计算读数
+    #    如果指针在 270度 范围内
+    if span_tip <= FIXED_SPAN:
+        progress = span_tip / FIXED_SPAN
+        val = vmin + progress * (vmax - vmin)
+        return val, virtual_start_ang # 返回角度用于debug绘图
     else:
-        dist_to_max = span_tip - span_total
-        dist_to_min = 360 - span_tip
-        return vmin if dist_to_min < dist_to_max else vmax
+        # 死区处理 (指针在底部空缺区)
+        dist_to_start = 360 - span_tip
+        dist_to_end = span_tip - FIXED_SPAN
+        if dist_to_start < dist_to_end:
+            return vmin, virtual_start_ang
+        else:
+            return vmax, virtual_start_ang
 
 # -----------------------------------------------------------
-# 辅助逻辑：OCR 与 坐标获取
+# 辅助：OCR 与 可视化
 # -----------------------------------------------------------
-def parse_num(text):
-    text = text.replace(',', '.').replace('l', '1').replace('O', '0').lower()
-    m = re.search(r"-?\d+(\.\d+)?", text)
+def parse_num(txt):
+    txt = txt.replace(',','.').replace('l','1').replace('O','0')
+    m = re.search(r"-?\d+(\.\d+)?", txt)
     return float(m.group()) if m else None
 
 def get_ocr_range(img, bbox, pt_min, pt_max):
@@ -94,14 +98,13 @@ def get_ocr_range(img, bbox, pt_min, pt_max):
     h, w = img.shape[:2]
     pad = 10
     roi = img[max(0,gy1-pad):min(h,gy2+pad), max(0,gx1-pad):min(w,gx2+pad)]
+    if roi.size == 0: return 0.0, 1.6
     
-    if roi.size == 0: return 0.0, 1.6 # 默认兜底
-
-    # 简单增强
+    # OCR 增强
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray)
     
-    res = reader.readtext(enhanced, detail=1)
+    res = reader.readtext(clahe, detail=1)
     cands = []
     for (box, txt, _) in res:
         v = parse_num(txt)
@@ -115,7 +118,6 @@ def get_ocr_range(img, bbox, pt_min, pt_max):
     d2 = lambda p1,p2: (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2
     vmin = min(cands, key=lambda x: d2(pt_min, x['c']))['v']
     vmax = min(cands, key=lambda x: d2(pt_max, x['c']))['v']
-    
     if vmax < vmin: vmin, vmax = vmax, vmin
     return vmin, vmax
 
@@ -126,14 +128,12 @@ def process_gauge(weights, source, output):
 
     res = model(img, verbose=False)[0]
     boxes = res.boxes.data.cpu().numpy()
-    
     gauges = boxes[boxes[:, 5] == CLS_GAUGE]
-    print(f"[Info] 检测到 {len(gauges)} 个仪表")
 
     for i, g_box in enumerate(gauges):
         gx1, gy1, gx2, gy2 = g_box[:4]
         
-        # 获取关键点 (在 gauge 框内)
+        # 获取关键点
         def get_pt(cid):
             cbs = [b for b in boxes[boxes[:, 5]==cid] 
                    if (gx1-20)<(b[0]+b[2])/2<(gx2+20) and (gy1-20)<(b[1]+b[3])/2<(gy2+20)]
@@ -142,37 +142,38 @@ def process_gauge(weights, source, output):
             return ((best[0]+best[2])/2, (best[1]+best[3])/2)
 
         pt_c, pt_min, pt_max, pt_tip = [get_pt(i) for i in [CLS_CENTER, CLS_MIN, CLS_MAX, CLS_TIP]]
-
-        # 绘图基础
-        cv2.rectangle(img, (int(gx1), int(gy1)), (int(gx2), int(gy2)), (0, 255, 0), 2)
         
+        cv2.rectangle(img, (int(gx1), int(gy1)), (int(gx2), int(gy2)), (0, 255, 0), 2)
         if not all([pt_c, pt_min, pt_max, pt_tip]):
-            print(f"  -> Gauge {i+1}: 关键点不全，跳过")
+            print(f"Skipping Gauge {i}: Missing points")
             continue
 
-        # 1. OCR 量程
         vmin, vmax = get_ocr_range(img, g_box[:4], pt_min, pt_max)
         
-        # 2. 智能读数
-        value = calculate_value_smart(pt_c, pt_min, pt_max, pt_tip, vmin, vmax)
-        print(f"  -> Gauge {i+1}: 读数={value:.3f} (量程 {vmin}~{vmax})")
-
-        # 3. 结果上图
-        # 指针线
+        # 计算读数 (带校准)
+        value, virtual_start_angle = get_reading_calibrated(pt_c, pt_min, pt_max, pt_tip, vmin, vmax)
+        print(f"Gauge {i}: Val={value:.3f} (Range {vmin}-{vmax})")
+        
+        # 绘图调试
+        # 1. 画指针
         cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_tip[0]), int(pt_tip[1])), (0, 0, 255), 3)
-        # 数值显示
-        text = f"{value:.2f}"
-        cv2.putText(img, text, (int(gx1), int(gy1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-        cv2.putText(img, f"Range: {vmin}-{vmax}", (int(gx1), int(gy2)+25), 0, 0.7, (200,200,200), 2)
+        # 2. 画计算出的 0刻度起始线 (紫色) - 用于验证逻辑是否对齐了刻度
+        r = 30 # 半径
+        sx = int(pt_c[0] + r * math.cos(math.radians(virtual_start_angle)))
+        sy = int(pt_c[1] + r * math.sin(math.radians(virtual_start_angle)))
+        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (sx, sy), (255, 0, 255), 2)
+
+        # 文本
+        cv2.putText(img, f"{value:.2f}", (int(gx1), int(gy1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+        cv2.putText(img, f"{vmin}-{vmax}", (int(gx1), int(gy2)+25), 0, 0.7, (255, 255, 255), 1)
 
     cv2.imwrite(output, img)
-    print(f"[Done] 保存至: {output}")
+    print(f"Saved: {output}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--weights", type=str, required=True)
     parser.add_argument("--source", type=str, required=True)
-    parser.add_argument("--output", type=str, default="result_optimized.jpg")
+    parser.add_argument("--output", type=str, default="result_calibrated.jpg")
     args = parser.parse_args()
-    
     process_gauge(args.weights, args.source, args.output)
