@@ -122,11 +122,14 @@ def process_gauge(weights, source, output):
         
         # 绘图
         cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_tip[0]), int(pt_tip[1])), (0, 0, 255), 3)
+        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_max[0]), int(pt_max[1])), (0, 0, 255), 2)
+        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_tip[0]), int(pt_tip[1])), (0, 0, 255), 3)
+        
         cv2.circle(img, (int(pt_min[0]), int(pt_min[1])), 4, (255,0,0), -1) # 蓝点：Min中心
         cv2.circle(img, (int(pt_max[0]), int(pt_max[1])), 4, (0,0,255), -1) # 红点：Max中心
         
-        cv2.putText(img, f"{value:.2f}", (int(gx1), int(gy1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
-        cv2.putText(img, f"Range: {vmin}-{vmax}", (int(gx1), int(gy2)+25), 0, 0.7, (255, 255, 255), 1)
+        cv2.putText(img, f"{value:.3f}", (int(gx1), int(gy1)-10), cv2.FONT_HERSHEY_SIMPLEX, 4.0, (0, 255, 0), 2)
+        cv2.putText(img, f"Range: {vmin}-{vmax}", (int(gx1), int(gy2)+25), 0, 1.5, (255, 255, 255), 1)
 
     cv2.imwrite(output, img)
     print(f"Saved: {output}")
