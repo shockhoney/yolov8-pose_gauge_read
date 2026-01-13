@@ -120,10 +120,9 @@ def process_gauge(weights, source, output):
         value = calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax)
         print(f"Gauge {i}: Val={value:.3f} (Range {vmin}-{vmax})")
         
-        # 绘图
-        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_tip[0]), int(pt_tip[1])), (0, 0, 255), 3)
-        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_max[0]), int(pt_max[1])), (0, 0, 255), 2)
         cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_min[0]), int(pt_min[1])), (255, 0, 0), 2)
+        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_max[0]), int(pt_max[1])), (0, 0, 255), 2)
+        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_tip[0]), int(pt_tip[1])), (0, 0, 255), 3)
         
         cv2.circle(img, (int(pt_min[0]), int(pt_min[1])), 4, (255,0,0), -1) # 蓝点：Min中心
         cv2.circle(img, (int(pt_max[0]), int(pt_max[1])), 4, (0,0,255), -1) # 红点：Max中心
