@@ -5,24 +5,14 @@ import re
 import argparse
 import sys
 from ultralytics import YOLO
-
-# -----------------------------------------------------------
-# 环境检查
-# -----------------------------------------------------------
-try:
-    import easyocr
-except ImportError:
-    print("[Error] 缺少 easyocr。请运行: pip install easyocr")
-    sys.exit(1)
+import easyocr
 
 print("[Init] 初始化 OCR...")
 reader = easyocr.Reader(['en'], gpu=True) 
 
 CLS_CENTER, CLS_GAUGE, CLS_MAX, CLS_MIN, CLS_TIP = 0, 1, 2, 3, 4
 
-# -----------------------------------------------------------
-# 核心逻辑：完全信任 YOLO 检测结果
-# -----------------------------------------------------------
+
 def get_angle(center, point):
     """计算绝对角度 0-360，X轴正向=0，顺时针增加"""
     dx = point[0] - center[0]
@@ -31,28 +21,20 @@ def get_angle(center, point):
     return (angle + 360) % 360
 
 def calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax):
-    """
-    【严格几何读数算法】
-    完全信任 YOLO 检测到的 Min 和 Max 点，不做人为的 270度 修正。
-    """
-    # 1. 获取三个点的绝对角度
+
+    #  获取三个点的绝对角度
     ang_min = get_angle(pt_c, pt_min)
     ang_max = get_angle(pt_c, pt_max)
     ang_tip = get_angle(pt_c, pt_tip)
 
-    # 2. 计算量程总跨度 (顺时针从 Min 到 Max)
-    #    公式: (End - Start + 360) % 360
-    #    这就是“完全信任”检测到的物理位置
     total_span = (ang_max - ang_min + 360) % 360
-
-    # 3. 计算指针当前跨度 (顺时针从 Min 到 Tip)
     tip_span = (ang_tip - ang_min + 360) % 360
 
-    # 4. 异常保护：防止 Min/Max 重叠导致除零 (跨度太小认为无效)
+    #  异常保护：防止 Min/Max 重叠导致除零 (跨度太小认为无效)
     if total_span < 10:
         return vmin
 
-    # 5. 读数计算
+    #  读数计算
     if tip_span <= total_span:
         # 正常情况：指针在 Min 和 Max 夹角之间
         progress = tip_span / total_span
@@ -68,9 +50,7 @@ def calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax):
         else:
             return vmax
 
-# -----------------------------------------------------------
 # 辅助功能：OCR 与 绘图
-# -----------------------------------------------------------
 def parse_num(txt):
     txt = txt.replace(',','.').replace('l','1').replace('O','0').lower()
     m = re.search(r"-?\d+(\.\d+)?", txt)
