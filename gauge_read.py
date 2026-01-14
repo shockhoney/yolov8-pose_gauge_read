@@ -40,7 +40,7 @@ def calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax):
     total_span = (ang_max - ang_min + 360) % 360
     
     # 3. 计算指针当前跨度 (顺时针 Min -> Tip)
-    tip_span = (ang_tip - ang_min + 360) % 360
+    tip_span = (ang_tip - ang_min) % 360
 
     # 4. 异常保护 (跨度太小认为无效)
     if total_span < 10:
