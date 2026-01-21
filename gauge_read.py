@@ -138,6 +138,10 @@ def get_ocr_range(img, bbox, pt_min, pt_max, ocr):
 # -----------------------------------------------------------
 def process_gauge(weights, source, output, ocr=None, range_min=None, range_max=None):
     model = YOLO(weights)
+    try:
+        model.model.float()
+    except Exception as exc:
+        print(f"Warning: failed to cast YOLO model to float32: {exc}")
     img = cv2.imread(source)
     if img is None: return
 
