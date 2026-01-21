@@ -91,6 +91,7 @@ def get_ocr_range(img, bbox, pt_min, pt_max, ocr):
     # OCR 识别
     result = ocr.readtext(enhanced) or []
 
+    raw_nums = []
     cands = []
     for item in result:
         if len(item) < 2:
@@ -100,12 +101,15 @@ def get_ocr_range(img, bbox, pt_min, pt_max, ocr):
         v = parse_num(text)
         if v is None:
             continue
+        raw_nums.append(v)
         if v < -20 or v > 20:
             continue
         # 获取字的位置
         cx = (box[0][0] + box[2][0]) / 2 + max(0, gx1 - pad)
         cy = (box[0][1] + box[2][1]) / 2 + max(0, gy1 - pad)
         cands.append({'v': v, 'c': (cx, cy)})
+
+    print(f"OCR numbers: {raw_nums}")
 
     if len(cands) < 2: return -20, 20
 
