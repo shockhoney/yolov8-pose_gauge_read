@@ -4,12 +4,12 @@ import numpy as np
 import re
 import argparse
 from ultralytics import YOLO
-import easyocr
+from paddleocr import PaddleOCR
 
 # -----------------------------------------------------------
 # 0. 环境初始化
 # -----------------------------------------------------------
-reader = easyocr.Reader(['en'], gpu=True)  # 初始化OCR
+ocr = PaddleOCR(use_angle_cls=True, lang='en')  # 使用paddleocr进行OCR
 CLS_CENTER, CLS_GAUGE, CLS_MAX, CLS_MIN, CLS_TIP = 0, 1, 2, 3, 4
 
 # -----------------------------------------------------------
@@ -38,15 +38,18 @@ def calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax):
 
     if tip_span <= total_span:
         progress = tip_span / total_span
-        return vmin + progress * (vmax - vmin)
+        value = vmin + progress * (vmax - vmin)
     else:
         dist_to_min = 360 - tip_span
         dist_to_max = tip_span - total_span
         
         if dist_to_min < dist_to_max:
-            return vmin
+            value = vmin
         else:
-            return vmax
+            value = vmax
+
+    # 限制读数范围在-20到20之间
+    return max(-20, min(value, 20))
 
 # -----------------------------------------------------------
 # 2. OCR 与 辅助功能
@@ -63,24 +66,29 @@ def get_ocr_range(img, bbox, pt_min, pt_max):
     h, w = img.shape[:2]
     pad = 20  # 扩大检测框
     roi = img[max(0,gy1-pad):min(h,gy2+pad), max(0,gx1-pad):min(w,gx2+pad)]
-    if roi.size == 0: return 0.0, 1.6
+    if roi.size == 0: return -20, 20
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray)
     
     # OCR 识别
-    res = reader.readtext(enhanced, detail=1, paragraph=False)
-    cands = []
-    for (box, txt, prob) in res:
-        v = parse_num(txt)
-        if v is not None and prob > 0.3:
-            cx = (box[0][0]+box[2][0])/2 + max(0,gx1-pad)
-            cy = (box[0][1]+box[2][1])/2 + max(0,gy1-pad)
-            cands.append({'v':v, 'c':(cx,cy)})
-            
-    if len(cands) < 2: return 0.0, 1.6
+    result = ocr.ocr(enhanced, cls=True)
     
-    d2 = lambda p1,p2: (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2
+    cands = []
+    for line in result:
+        for word_info in line:
+            text = word_info[1]
+            v = parse_num(text)
+            if v is not None:
+                # 获取字的位置
+                box = word_info[0]
+                cx = (box[0][0] + box[2][0]) / 2 + max(0, gx1 - pad)
+                cy = (box[0][1] + box[2][1]) / 2 + max(0, gy1 - pad)
+                cands.append({'v': v, 'c': (cx, cy)})
+
+    if len(cands) < 2: return -20, 20
+
+    d2 = lambda p1, p2: (p1[0] - p2[0])**2 + (p1[1] - p2[1])**2
     vmin = min(cands, key=lambda x: d2(pt_min, x['c']))['v']
     vmax = min(cands, key=lambda x: d2(pt_max, x['c']))['v']
     
