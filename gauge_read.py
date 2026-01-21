@@ -62,8 +62,8 @@ def calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax):
         else:
             value = vmax
 
-    # 限制读数范围在-20到20之间
-    return max(-20, min(value, 20))
+    # 限制读数范围在-200到200之间
+    return max(-200, min(value, 200))
 
 # -----------------------------------------------------------
 # 2. OCR 与 辅助功能
