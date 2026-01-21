@@ -1,3 +1,4 @@
+
 import cv2
 import math
 import numpy as np
@@ -9,7 +10,7 @@ from paddleocr import PaddleOCR
 # -----------------------------------------------------------
 # 0. 环境初始化
 # -----------------------------------------------------------
-ocr = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False)  # 禁用GPU，强制使用CPU
+ocr = PaddleOCR(use_angle_cls=True, lang='en')  # 默认使用CPU进行OCR
 CLS_CENTER, CLS_GAUGE, CLS_MAX, CLS_MIN, CLS_TIP = 0, 1, 2, 3, 4
 
 # -----------------------------------------------------------
