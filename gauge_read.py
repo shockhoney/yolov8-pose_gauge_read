@@ -9,7 +9,7 @@ from paddleocr import PaddleOCR
 # -----------------------------------------------------------
 # 0. 环境初始化
 # -----------------------------------------------------------
-ocr = PaddleOCR(use_angle_cls=True, lang='en', use_gpu=False)  # 确保不使用GPU，强制使用CPU
+ocr = PaddleOCR(use_angle_cls=True, lang='en')  # 使用默认配置，自动选择设备
 CLS_CENTER, CLS_GAUGE, CLS_MAX, CLS_MIN, CLS_TIP = 0, 1, 2, 3, 4
 
 # -----------------------------------------------------------
