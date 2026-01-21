@@ -4,10 +4,20 @@ import numpy as np
 import re
 import argparse
 from ultralytics import YOLO
+import easyocr
 
 # -----------------------------------------------------------
 # 0. 环境初始化
 # -----------------------------------------------------------
+try:
+    import easyocr
+except ImportError:
+    print("[Error] 缺少 easyocr。请运行: pip install easyocr")
+    sys.exit(1)
+
+print("[Init] 初始化 OCR...")
+reader = easyocr.Reader(['en'], gpu=True) 
+
 CLS_CENTER, CLS_GAUGE, CLS_MAX, CLS_MIN, CLS_TIP = 0, 1, 2, 3, 4
 
 # -----------------------------------------------------------
@@ -22,28 +32,33 @@ def get_angle(center, point):
 
 def calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax):
     """
-    【严格几何读数】完全基于 YOLO 检测到的 Min/Max/Tip 三点物理位置进行计算。
+    【严格几何读数算法】
+    完全信任 YOLO 检测到的 Min 和 Max 点，不做人为的 270度 修正。
     """
     # 获取三个点的绝对角度
     ang_min = get_angle(pt_c, pt_min)
     ang_max = get_angle(pt_c, pt_max)
     ang_tip = get_angle(pt_c, pt_tip)
 
-    # 计算量程总跨度 (顺时针 Min -> Max)
+    # 2. 计算量程总跨度 (顺时针从 Min 到 Max)
+    #    公式: (End - Start + 360) % 360
+    #    这就是“完全信任”检测到的物理位置
     total_span = (ang_max - ang_min + 360) % 360
-    
-    # 计算指针当前跨度 (顺时针 Min -> Tip)
-    tip_span = (ang_tip - ang_min) % 360
 
-    # 异常保护 (跨度太小认为无效)
+    # 3. 计算指针当前跨度 (顺时针从 Min 到 Tip)
+    tip_span = (ang_tip - ang_min + 360) % 360
+
+    # 4. 异常保护：防止 Min/Max 重叠导致除零 (跨度太小认为无效)
     if total_span < 10:
         return vmin
 
-    # 读数计算与死区处理
+    # 5. 读数计算
     if tip_span <= total_span:
         progress = tip_span / total_span
         return vmin + progress * (vmax - vmin)
     else:
+        # 死区情况：指针在 Max 和 Min 之间的空白区域
+        # 判断它是离 Min 近(归零)，还是离 Max 近(满偏)
         dist_to_min = 360 - tip_span   # 继续转一圈回到 Min 的距离
         dist_to_max = tip_span - total_span # 刚过 Max 的距离
         
@@ -110,7 +125,6 @@ def process_gauge(weights, source, output):
     for i, g_box in enumerate(gauges):
         gx1, gy1, gx2, gy2 = g_box[:4]
         
-        # 获取 Gauge 内部的关键点
         def get_pt(cid):
             cbs = [b for b in boxes[boxes[:, 5]==cid] 
                    if (gx1-20)<(b[0]+b[2])/2<(gx2+20) and (gy1-20)<(b[1]+b[3])/2<(gy2+20)]
@@ -137,23 +151,13 @@ def process_gauge(weights, source, output):
         value = calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax)
         print(f"表盘 {i}: 读数={value:.3f} (量程 {vmin}-{vmax})")
         
-        # --- 可视化 (统一定义颜色：Min蓝, Max红, Tip绿) ---
+        # 绘图
+        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_tip[0]), int(pt_tip[1])), (0, 0, 255), 3)
+        cv2.circle(img, (int(pt_min[0]), int(pt_min[1])), 4, (255,0,0), -1) # 蓝点：Min中心
+        cv2.circle(img, (int(pt_max[0]), int(pt_max[1])), 4, (0,0,255), -1) # 红点：Max中心
         
-        # 画线
-        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_min[0]), int(pt_min[1])), (255, 0, 0), 2)  # Min线
-        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_max[0]), int(pt_max[1])), (0, 0, 255), 2)  # Max线
-        cv2.line(img, (int(pt_c[0]), int(pt_c[1])), (int(pt_tip[0]), int(pt_tip[1])), (0, 255, 0), 3)  # 指针线
-        
-        # 画点
-        cv2.circle(img, (int(pt_min[0]), int(pt_min[1])), 5, (255,0,0), -1)  # 蓝点
-        cv2.circle(img, (int(pt_max[0]), int(pt_max[1])), 5, (0,0,255), -1)  # 红点
-        cv2.circle(img, (int(pt_tip[0]), int(pt_tip[1])), 5, (0,255,0), -1)  # 绿点
-        
-        # 写字 (调整了大小以适应普通图片)
-        cv2.putText(img, f"{value:.3f}", (int(gx1), int(gy1)-10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 255, 0), 3)
-        cv2.putText(img, f"Range: {vmin}-{vmax}", (int(gx1), int(gy2)+30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(img, f"{value:.2f}", (int(gx1), int(gy1)-10), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2)
+        cv2.putText(img, f"Range: {vmin}-{vmax}", (int(gx1), int(gy2)+25), 0, 0.7, (255, 255, 255), 1)
 
     cv2.imwrite(output, img)
     print(f"保存结果: {output}")
