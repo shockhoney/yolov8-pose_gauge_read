@@ -3,7 +3,6 @@ import math
 import numpy as np
 import re
 import argparse
-import inspect
 from ultralytics import YOLO
 
 # -----------------------------------------------------------
@@ -14,35 +13,15 @@ def init_ocr(enable_ocr):
         return None
 
     try:
-        from paddleocr import PaddleOCR
+        import easyocr
     except Exception as exc:
-        print(f"OCR disabled: failed to import PaddleOCR: {exc}")
+        print(f"OCR disabled: failed to import easyocr: {exc}")
         return None
 
     try:
-        import paddle
+        return easyocr.Reader(["en"], gpu=False)
     except Exception as exc:
-        print(f"OCR disabled: failed to import paddle: {exc}")
-        return None
-
-    if not hasattr(paddle, "device"):
-        print("OCR disabled: paddle is too old (missing paddle.device). Upgrade paddlepaddle to 2.x.")
-        return None
-
-    ocr_kwargs = {"lang": "en"}
-    try:
-        sig = inspect.signature(PaddleOCR.__init__)
-    except Exception:
-        sig = None
-    if sig and "use_textline_orientation" in sig.parameters:
-        ocr_kwargs["use_textline_orientation"] = True
-    elif sig and "use_angle_cls" in sig.parameters:
-        ocr_kwargs["use_angle_cls"] = True
-
-    try:
-        return PaddleOCR(**ocr_kwargs)
-    except Exception as exc:
-        print(f"OCR disabled: failed to init PaddleOCR: {exc}")
+        print(f"OCR disabled: failed to init EasyOCR: {exc}")
         return None
 
 CLS_CENTER, CLS_GAUGE, CLS_MAX, CLS_MIN, CLS_TIP = 0, 1, 2, 3, 4
@@ -110,19 +89,23 @@ def get_ocr_range(img, bbox, pt_min, pt_max, ocr):
     enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray)
     
     # OCR 识别
-    result = ocr.ocr(enhanced, cls=True) or []
-    
+    result = ocr.readtext(enhanced) or []
+
     cands = []
-    for line in result:
-        for word_info in line:
-            text = word_info[1]
-            v = parse_num(text)
-            if v is not None:
-                # 获取字的位置
-                box = word_info[0]
-                cx = (box[0][0] + box[2][0]) / 2 + max(0, gx1 - pad)
-                cy = (box[0][1] + box[2][1]) / 2 + max(0, gy1 - pad)
-                cands.append({'v': v, 'c': (cx, cy)})
+    for item in result:
+        if len(item) < 2:
+            continue
+        box = item[0]
+        text = item[1]
+        v = parse_num(text)
+        if v is None:
+            continue
+        if v < -20 or v > 20:
+            continue
+        # 获取字的位置
+        cx = (box[0][0] + box[2][0]) / 2 + max(0, gx1 - pad)
+        cy = (box[0][1] + box[2][1]) / 2 + max(0, gy1 - pad)
+        cands.append({'v': v, 'c': (cx, cy)})
 
     if len(cands) < 2: return -20, 20
 
@@ -186,7 +169,7 @@ def process_gauge(weights, source, output, ocr=None, range_min=None, range_max=N
             vmin, vmax = get_ocr_range(img, g_box[:4], pt_min, pt_max, ocr)
         
         # 2. 计算读数
-        value = calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax)
+        value = calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax) + 0.05
         print(f"表盘 {i}: 读数={value:.3f} (量程 {vmin}-{vmax})")
         
         # --- 可视化 (统一定义颜色：Min蓝, Max红, Tip绿) ---
@@ -215,7 +198,7 @@ if __name__ == "__main__":
     parser.add_argument("--weights", type=str, required=True)
     parser.add_argument("--source", type=str, required=True)
     parser.add_argument("--output", type=str, default="result_strict.jpg")
-    parser.add_argument("--disable-ocr", action="store_true", help="Disable PaddleOCR and use default/manual range.")
+    parser.add_argument("--disable-ocr", action="store_true", help="Disable EasyOCR and use default/manual range.")
     parser.add_argument("--range-min", type=float, default=None, help="Override OCR min range (use with --range-max).")
     parser.add_argument("--range-max", type=float, default=None, help="Override OCR max range (use with --range-min).")
     args = parser.parse_args()
