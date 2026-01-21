@@ -3,13 +3,48 @@ import math
 import numpy as np
 import re
 import argparse
+import inspect
 from ultralytics import YOLO
-from paddleocr import PaddleOCR
 
 # -----------------------------------------------------------
 # 0. 环境初始化
 # -----------------------------------------------------------
-ocr = PaddleOCR(use_angle_cls=True, lang='en')  # 使用默认配置，自动选择设备
+def init_ocr(enable_ocr):
+    if not enable_ocr:
+        return None
+
+    try:
+        from paddleocr import PaddleOCR
+    except Exception as exc:
+        print(f"OCR disabled: failed to import PaddleOCR: {exc}")
+        return None
+
+    try:
+        import paddle
+    except Exception as exc:
+        print(f"OCR disabled: failed to import paddle: {exc}")
+        return None
+
+    if not hasattr(paddle, "device"):
+        print("OCR disabled: paddle is too old (missing paddle.device). Upgrade paddlepaddle to 2.x.")
+        return None
+
+    ocr_kwargs = {"lang": "en"}
+    try:
+        sig = inspect.signature(PaddleOCR.__init__)
+    except Exception:
+        sig = None
+    if sig and "use_textline_orientation" in sig.parameters:
+        ocr_kwargs["use_textline_orientation"] = True
+    elif sig and "use_angle_cls" in sig.parameters:
+        ocr_kwargs["use_angle_cls"] = True
+
+    try:
+        return PaddleOCR(**ocr_kwargs)
+    except Exception as exc:
+        print(f"OCR disabled: failed to init PaddleOCR: {exc}")
+        return None
+
 CLS_CENTER, CLS_GAUGE, CLS_MAX, CLS_MIN, CLS_TIP = 0, 1, 2, 3, 4
 
 # -----------------------------------------------------------
@@ -60,8 +95,11 @@ def parse_num(txt):
     m = re.search(r"-?\d+(\.\d+)?", txt)
     return float(m.group()) if m else None
 
-def get_ocr_range(img, bbox, pt_min, pt_max):
+def get_ocr_range(img, bbox, pt_min, pt_max, ocr):
     """识别并匹配量程"""
+    if ocr is None:
+        return -20, 20
+
     gx1, gy1, gx2, gy2 = map(int, bbox)
     h, w = img.shape[:2]
     pad = 20  # 扩大检测框
@@ -72,7 +110,7 @@ def get_ocr_range(img, bbox, pt_min, pt_max):
     enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray)
     
     # OCR 识别
-    result = ocr.ocr(enhanced, cls=True)
+    result = ocr.ocr(enhanced, cls=True) or []
     
     cands = []
     for line in result:
@@ -98,7 +136,7 @@ def get_ocr_range(img, bbox, pt_min, pt_max):
 # -----------------------------------------------------------
 # 3. 主程序
 # -----------------------------------------------------------
-def process_gauge(weights, source, output):
+def process_gauge(weights, source, output, ocr=None, range_min=None, range_max=None):
     model = YOLO(weights)
     img = cv2.imread(source)
     if img is None: return
@@ -107,6 +145,13 @@ def process_gauge(weights, source, output):
     boxes = res.boxes.data.cpu().numpy()
     gauges = boxes[boxes[:, 5] == CLS_GAUGE]
     print(f"检测到 {len(gauges)} 个表盘")
+
+    if ocr is None and range_min is None and range_max is None:
+        print("OCR unavailable; using default range -20..20.")
+
+    has_range_override = range_min is not None and range_max is not None
+    if not has_range_override and (range_min is not None or range_max is not None):
+        print("Range override ignored: both --range-min and --range-max are required.")
 
     for i, g_box in enumerate(gauges):
         gx1, gy1, gx2, gy2 = g_box[:4]
@@ -131,7 +176,10 @@ def process_gauge(weights, source, output):
             continue
 
         # 1. OCR 获取量程
-        vmin, vmax = get_ocr_range(img, g_box[:4], pt_min, pt_max)
+        if has_range_override:
+            vmin, vmax = range_min, range_max
+        else:
+            vmin, vmax = get_ocr_range(img, g_box[:4], pt_min, pt_max, ocr)
         
         # 2. 计算读数
         value = calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax)
@@ -163,5 +211,9 @@ if __name__ == "__main__":
     parser.add_argument("--weights", type=str, required=True)
     parser.add_argument("--source", type=str, required=True)
     parser.add_argument("--output", type=str, default="result_strict.jpg")
+    parser.add_argument("--disable-ocr", action="store_true", help="Disable PaddleOCR and use default/manual range.")
+    parser.add_argument("--range-min", type=float, default=None, help="Override OCR min range (use with --range-max).")
+    parser.add_argument("--range-max", type=float, default=None, help="Override OCR max range (use with --range-min).")
     args = parser.parse_args()
-    process_gauge(args.weights, args.source, args.output)
+    ocr = init_ocr(not args.disable_ocr)
+    process_gauge(args.weights, args.source, args.output, ocr=ocr, range_min=args.range_min, range_max=args.range_max)
