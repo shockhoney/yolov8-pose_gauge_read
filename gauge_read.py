@@ -4,10 +4,12 @@ import numpy as np
 import re
 import argparse
 from ultralytics import YOLO
+import easyocr
 
 # -----------------------------------------------------------
 # 0. 环境初始化
 # -----------------------------------------------------------
+reader = easyocr.Reader(['en'], gpu=True)  # 初始化OCR
 CLS_CENTER, CLS_GAUGE, CLS_MAX, CLS_MIN, CLS_TIP = 0, 1, 2, 3, 4
 
 # -----------------------------------------------------------
@@ -24,28 +26,22 @@ def calculate_value_strict(pt_c, pt_min, pt_max, pt_tip, vmin, vmax):
     """
     【严格几何读数】完全基于 YOLO 检测到的 Min/Max/Tip 三点物理位置进行计算。
     """
-    # 获取三个点的绝对角度
     ang_min = get_angle(pt_c, pt_min)
     ang_max = get_angle(pt_c, pt_max)
     ang_tip = get_angle(pt_c, pt_tip)
 
-    # 计算量程总跨度 (顺时针 Min -> Max)
     total_span = (ang_max - ang_min + 360) % 360
-    
-    # 计算指针当前跨度 (顺时针 Min -> Tip)
     tip_span = (ang_tip - ang_min) % 360
 
-    # 异常保护 (跨度太小认为无效)
     if total_span < 10:
         return vmin
 
-    # 读数计算与死区处理
     if tip_span <= total_span:
         progress = tip_span / total_span
         return vmin + progress * (vmax - vmin)
     else:
-        dist_to_min = 360 - tip_span   # 继续转一圈回到 Min 的距离
-        dist_to_max = tip_span - total_span # 刚过 Max 的距离
+        dist_to_min = 360 - tip_span
+        dist_to_max = tip_span - total_span
         
         if dist_to_min < dist_to_max:
             return vmin
@@ -69,7 +65,6 @@ def get_ocr_range(img, bbox, pt_min, pt_max):
     roi = img[max(0,gy1-pad):min(h,gy2+pad), max(0,gx1-pad):min(w,gx2+pad)]
     if roi.size == 0: return 0.0, 1.6
 
-    # 图像增强
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     enhanced = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(gray)
     
@@ -79,14 +74,12 @@ def get_ocr_range(img, bbox, pt_min, pt_max):
     for (box, txt, prob) in res:
         v = parse_num(txt)
         if v is not None and prob > 0.3:
-            # 将 ROI 坐标转回全局坐标
             cx = (box[0][0]+box[2][0])/2 + max(0,gx1-pad)
             cy = (box[0][1]+box[2][1])/2 + max(0,gy1-pad)
             cands.append({'v':v, 'c':(cx,cy)})
             
     if len(cands) < 2: return 0.0, 1.6
     
-    # 空间距离匹配 (离物理点最近的数字)
     d2 = lambda p1,p2: (p1[0]-p2[0])**2 + (p1[1]-p2[1])**2
     vmin = min(cands, key=lambda x: d2(pt_min, x['c']))['v']
     vmax = min(cands, key=lambda x: d2(pt_max, x['c']))['v']
@@ -110,7 +103,6 @@ def process_gauge(weights, source, output):
     for i, g_box in enumerate(gauges):
         gx1, gy1, gx2, gy2 = g_box[:4]
         
-        # 获取 Gauge 内部的关键点
         def get_pt(cid):
             cbs = [b for b in boxes[boxes[:, 5]==cid] 
                    if (gx1-20)<(b[0]+b[2])/2<(gx2+20) and (gy1-20)<(b[1]+b[3])/2<(gy2+20)]
